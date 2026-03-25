@@ -2,85 +2,73 @@
 """
 Extract device ID and phone number pairs from screenshots and output as CSV.
 
+Uses Tesseract OCR — fully local and free. No API keys needed.
+
 Usage:
     python screenshot_to_csv.py <screenshot_dir> [--output output.csv]
 
 Requires:
-    pip install anthropic
-
-Set ANTHROPIC_API_KEY environment variable before running.
+    pip install pytesseract Pillow
+    Also install Tesseract itself:
+        Ubuntu/Debian: sudo apt install tesseract-ocr
+        macOS:         brew install tesseract
+        Windows:       https://github.com/UB-Mannheim/tesseract/wiki
 """
 
-import anthropic
-import base64
 import csv
-import sys
 import re
+import sys
 from pathlib import Path
 
-SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+import pytesseract
+from PIL import Image
 
-SYSTEM_PROMPT = (
-    "You extract device IDs and phone numbers from screenshots. "
-    "For each pair found, output exactly one line in the format: device_id,phone_number\n"
-    "Output ONLY the comma-separated pairs, nothing else. No headers, no explanations.\n"
-    "If a screenshot contains multiple pairs, output one per line.\n"
-    "Normalize phone numbers to digits only (with leading + for international if present).\n"
-    "If you cannot find a valid pair, output nothing."
+SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"}
+
+# Patterns to match device IDs and phone numbers.
+# Adjust these if your screenshots use a different format.
+DEVICE_ID_PATTERN = re.compile(
+    r"(?i)(?:device\s*(?:id)?|dev\s*id|IMEI|serial)[\s:=]*([A-Za-z0-9\-_]+)"
+)
+PHONE_PATTERN = re.compile(
+    r"(?:phone|number|ph|mobile|cell|tel)[\s:=]*([\+]?[\d\s\-\(\)\.]{7,20})"
+    r"|"
+    r"((?:\+?1?[\s\-\.]?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4}))"  # raw phone numbers
+    , re.IGNORECASE
 )
 
-BATCH_SIZE = 5
+
+def normalize_phone(raw: str) -> str:
+    """Strip formatting from a phone number, keeping leading +."""
+    raw = raw.strip()
+    digits = re.sub(r"[^\d+]", "", raw)
+    return digits
 
 
-def encode_image(path: Path) -> tuple[str, str]:
-    media_types = {
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-    }
-    data = base64.standard_b64encode(path.read_bytes()).decode("utf-8")
-    return media_types[path.suffix.lower()], data
+def extract_pairs(text: str) -> list[tuple[str, str]]:
+    """Find device ID and phone number pairs from OCR text."""
+    device_ids = DEVICE_ID_PATTERN.findall(text)
+    phone_matches = PHONE_PATTERN.findall(text)
 
+    # Each phone match has two groups (labeled vs raw); pick whichever matched
+    phones = []
+    for match in phone_matches:
+        raw = match[0] if match[0] else match[1]
+        normalized = normalize_phone(raw)
+        if len(normalized.replace("+", "")) >= 7:
+            phones.append(normalized)
 
-def build_batch_content(paths: list[Path]) -> list[dict]:
-    content = []
-    for path in paths:
-        media_type, data = encode_image(path)
-        content.append(
-            {
-                "type": "image",
-                "source": {"type": "base64", "media_type": media_type, "data": data},
-            }
-        )
-    content.append(
-        {
-            "type": "text",
-            "text": "Extract all device ID and phone number pairs from these screenshots.",
-        }
-    )
-    return content
-
-
-def parse_pairs(text: str) -> list[tuple[str, str]]:
-    pairs = []
-    for line in text.strip().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = line.split(",", 1)
-        if len(parts) == 2:
-            device_id = parts[0].strip()
-            phone = parts[1].strip()
-            if device_id and phone:
-                pairs.append((device_id, phone))
+    pairs = list(zip(device_ids, phones))
     return pairs
 
 
-def process_screenshots(screenshot_dir: Path, output_path: Path):
-    client = anthropic.Anthropic()
+def ocr_image(path: Path) -> str:
+    """Run Tesseract OCR on a single image."""
+    img = Image.open(path)
+    return pytesseract.image_to_string(img)
 
+
+def process_screenshots(screenshot_dir: Path, output_path: Path):
     image_files = sorted(
         f for f in screenshot_dir.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS
     )
@@ -94,61 +82,20 @@ def process_screenshots(screenshot_dir: Path, output_path: Path):
     all_pairs = []
     errors = []
 
-    for i in range(0, len(image_files), BATCH_SIZE):
-        batch = image_files[i : i + BATCH_SIZE]
-        batch_num = i // BATCH_SIZE + 1
-        total_batches = (len(image_files) + BATCH_SIZE - 1) // BATCH_SIZE
-        print(f"Processing batch {batch_num}/{total_batches} ({len(batch)} images)...")
-
+    for i, path in enumerate(image_files, 1):
+        print(f"[{i}/{len(image_files)}] {path.name}...", end=" ", flush=True)
         try:
-            response = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4096,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": build_batch_content(batch)}],
-            )
-            text = response.content[0].text
-            pairs = parse_pairs(text)
-            all_pairs.extend(pairs)
-            print(f"  Extracted {len(pairs)} pairs")
+            text = ocr_image(path)
+            pairs = extract_pairs(text)
+            if pairs:
+                all_pairs.extend(pairs)
+                print(f"found {len(pairs)} pair(s)")
+            else:
+                print("no pairs found")
+                errors.append(f"{path.name}: no device_id/phone pair detected")
         except Exception as e:
-            error_msg = f"Batch {batch_num} failed: {e}"
-            print(f"  ERROR: {error_msg}")
-            errors.append(error_msg)
-            # Fall back to processing individually
-            for path in batch:
-                try:
-                    media_type, data = encode_image(path)
-                    response = client.messages.create(
-                        model="claude-sonnet-4-6",
-                        max_tokens=1024,
-                        system=SYSTEM_PROMPT,
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {
-                                        "type": "image",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": media_type,
-                                            "data": data,
-                                        },
-                                    },
-                                    {
-                                        "type": "text",
-                                        "text": "Extract the device ID and phone number pair from this screenshot.",
-                                    },
-                                ],
-                            }
-                        ],
-                    )
-                    text = response.content[0].text
-                    pairs = parse_pairs(text)
-                    all_pairs.extend(pairs)
-                except Exception as e2:
-                    print(f"  ERROR on {path.name}: {e2}")
-                    errors.append(f"{path.name}: {e2}")
+            print(f"ERROR: {e}")
+            errors.append(f"{path.name}: {e}")
 
     with open(output_path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -157,7 +104,9 @@ def process_screenshots(screenshot_dir: Path, output_path: Path):
 
     print(f"\nDone! Wrote {len(all_pairs)} pairs to {output_path}")
     if errors:
-        print(f"Encountered {len(errors)} errors (see above)")
+        print(f"\n{len(errors)} warnings/errors:")
+        for e in errors:
+            print(f"  - {e}")
 
 
 def main():
@@ -170,17 +119,11 @@ def main():
     parser.add_argument(
         "--output", "-o", type=Path, default=Path("output.csv"), help="Output CSV path (default: output.csv)"
     )
-    parser.add_argument(
-        "--batch-size", "-b", type=int, default=BATCH_SIZE, help=f"Images per API call (default: {BATCH_SIZE})"
-    )
     args = parser.parse_args()
 
     if not args.screenshot_dir.is_dir():
         print(f"Error: {args.screenshot_dir} is not a directory")
         sys.exit(1)
-
-    global BATCH_SIZE
-    BATCH_SIZE = args.batch_size
 
     process_screenshots(args.screenshot_dir, args.output)
 
