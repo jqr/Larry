@@ -7,15 +7,16 @@ Uses Tesseract OCR — fully local and free. No API keys needed.
 Usage:
     python screenshot_to_csv.py <screenshot_dir> [--output output.csv]
 
-Requires:
-    pip install pytesseract Pillow
-    Also install Tesseract itself:
-        Ubuntu/Debian: sudo apt install tesseract-ocr
-        macOS:         brew install tesseract
-        Windows:       https://github.com/UB-Mannheim/tesseract/wiki
+    Or via Docker:
+    docker run --rm -v ./screenshots:/data screenshot-to-csv
+
+Configure regex patterns via environment variables:
+    DEVICE_ID_REGEX  - regex with one capture group for the device ID
+    PHONE_REGEX      - regex with one capture group for the phone number
 """
 
 import csv
+import os
 import re
 import sys
 from pathlib import Path
@@ -25,41 +26,59 @@ from PIL import Image
 
 SUPPORTED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"}
 
-# Patterns to match device IDs and phone numbers.
-# Adjust these if your screenshots use a different format.
-DEVICE_ID_PATTERN = re.compile(
+DEFAULT_DEVICE_ID_REGEX = (
     r"(?i)(?:device\s*(?:id)?|dev\s*id|IMEI|serial)[\s:=]*([A-Za-z0-9\-_]+)"
 )
-PHONE_PATTERN = re.compile(
-    r"(?:phone|number|ph|mobile|cell|tel)[\s:=]*([\+]?[\d\s\-\(\)\.]{7,20})"
+DEFAULT_PHONE_REGEX = (
+    r"(?i)(?:phone|number|ph|mobile|cell|tel)[\s:=]*([\+]?[\d\s\-\(\)\.]{7,20})"
     r"|"
-    r"((?:\+?1?[\s\-\.]?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4}))"  # raw phone numbers
-    , re.IGNORECASE
+    r"((?:\+?1?[\s\-\.]?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4}))"
 )
+
+
+def build_patterns() -> tuple[re.Pattern, re.Pattern]:
+    device_regex = os.environ.get("DEVICE_ID_REGEX", DEFAULT_DEVICE_ID_REGEX)
+    phone_regex = os.environ.get("PHONE_REGEX", DEFAULT_PHONE_REGEX)
+
+    try:
+        device_pat = re.compile(device_regex)
+    except re.error as e:
+        print(f"Error: invalid DEVICE_ID_REGEX: {e}")
+        sys.exit(1)
+
+    try:
+        phone_pat = re.compile(phone_regex, re.IGNORECASE)
+    except re.error as e:
+        print(f"Error: invalid PHONE_REGEX: {e}")
+        sys.exit(1)
+
+    return device_pat, phone_pat
 
 
 def normalize_phone(raw: str) -> str:
     """Strip formatting from a phone number, keeping leading +."""
-    raw = raw.strip()
-    digits = re.sub(r"[^\d+]", "", raw)
-    return digits
+    return re.sub(r"[^\d+]", "", raw.strip())
 
 
-def extract_pairs(text: str) -> list[tuple[str, str]]:
+def extract_pairs(
+    text: str, device_pat: re.Pattern, phone_pat: re.Pattern
+) -> list[tuple[str, str]]:
     """Find device ID and phone number pairs from OCR text."""
-    device_ids = DEVICE_ID_PATTERN.findall(text)
-    phone_matches = PHONE_PATTERN.findall(text)
+    device_ids = device_pat.findall(text)
 
-    # Each phone match has two groups (labeled vs raw); pick whichever matched
+    phone_matches = phone_pat.findall(text)
     phones = []
     for match in phone_matches:
-        raw = match[0] if match[0] else match[1]
+        # Handle both single-group custom regex and multi-group default regex
+        if isinstance(match, tuple):
+            raw = next((g for g in match if g), "")
+        else:
+            raw = match
         normalized = normalize_phone(raw)
         if len(normalized.replace("+", "")) >= 7:
             phones.append(normalized)
 
-    pairs = list(zip(device_ids, phones))
-    return pairs
+    return list(zip(device_ids, phones))
 
 
 def ocr_image(path: Path) -> str:
@@ -68,7 +87,12 @@ def ocr_image(path: Path) -> str:
     return pytesseract.image_to_string(img)
 
 
-def process_screenshots(screenshot_dir: Path, output_path: Path):
+def process_screenshots(
+    screenshot_dir: Path,
+    output_path: Path,
+    device_pat: re.Pattern,
+    phone_pat: re.Pattern,
+):
     image_files = sorted(
         f for f in screenshot_dir.iterdir() if f.suffix.lower() in SUPPORTED_EXTENSIONS
     )
@@ -86,7 +110,7 @@ def process_screenshots(screenshot_dir: Path, output_path: Path):
         print(f"[{i}/{len(image_files)}] {path.name}...", end=" ", flush=True)
         try:
             text = ocr_image(path)
-            pairs = extract_pairs(text)
+            pairs = extract_pairs(text, device_pat, phone_pat)
             if pairs:
                 all_pairs.extend(pairs)
                 print(f"found {len(pairs)} pair(s)")
@@ -115,9 +139,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Extract device ID and phone number pairs from screenshots into CSV"
     )
-    parser.add_argument("screenshot_dir", type=Path, help="Directory containing screenshots")
     parser.add_argument(
-        "--output", "-o", type=Path, default=Path("output.csv"), help="Output CSV path (default: output.csv)"
+        "screenshot_dir", type=Path, help="Directory containing screenshots"
+    )
+    parser.add_argument(
+        "--output", "-o", type=Path, default=Path("output.csv"),
+        help="Output CSV path (default: output.csv)",
     )
     args = parser.parse_args()
 
@@ -125,7 +152,12 @@ def main():
         print(f"Error: {args.screenshot_dir} is not a directory")
         sys.exit(1)
 
-    process_screenshots(args.screenshot_dir, args.output)
+    device_pat, phone_pat = build_patterns()
+
+    if os.environ.get("DEVICE_ID_REGEX") or os.environ.get("PHONE_REGEX"):
+        print("Using custom regex patterns from environment")
+
+    process_screenshots(args.screenshot_dir, args.output, device_pat, phone_pat)
 
 
 if __name__ == "__main__":
