@@ -14,90 +14,37 @@ Point it at a folder of screenshots — each containing a device ID and phone nu
 
 The default regex patterns recognize common labels like "Device ID", "Dev ID", "IMEI", "Serial" for device IDs, and "Phone", "Mobile", "Cell", "Tel" for phone numbers. It also picks up raw US-format phone numbers without labels. If your screenshots use different labeling, you can override the patterns via environment variables (see [Custom Regex](#custom-regex-patterns) below).
 
-## Quick Start (Docker)
+## Prerequisites
 
-Docker is the easiest way to run this — no need to install Python or Tesseract on your machine.
+Install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/) and make sure it's running.
 
-```bash
-# Build the image (one time):
-docker build -t screenshot-to-csv .
+## Setup
 
-# Run it — mount your screenshots folder to /data:
-docker run --rm -v ./screenshots:/data screenshot-to-csv
-```
-
-The output CSV appears at `./screenshots/output.csv`.
-
-### Windows (Docker Desktop)
-
-1. Install [Docker Desktop for Windows](https://www.docker.com/products/docker-desktop/)
-2. Open PowerShell or Command Prompt in the project directory
-3. Build and run:
+Open PowerShell or Command Prompt in the project directory and build the image (one time):
 
 ```powershell
 docker build -t screenshot-to-csv .
+```
 
-# PowerShell — use ${PWD} for the current directory:
-docker run --rm -v ${PWD}/screenshots:/data screenshot-to-csv
+## Usage
 
-# Command Prompt — use %cd% instead:
+Put your screenshots in a folder (e.g. `screenshots\`), then run:
+
+```powershell
+# PowerShell:
+docker run --rm -v ${PWD}\screenshots:/data screenshot-to-csv
+
+# Command Prompt:
 docker run --rm -v %cd%\screenshots:/data screenshot-to-csv
 ```
 
-### macOS / Linux (Docker)
+The output CSV appears at `screenshots\output.csv`.
 
-```bash
-docker build -t screenshot-to-csv .
-docker run --rm -v ./screenshots:/data screenshot-to-csv
-```
+You can also use an absolute path:
 
-## Local Setup (without Docker)
-
-### Linux
-
-```bash
-sudo apt install tesseract-ocr
-pip install -r requirements.txt
-python screenshot_to_csv.py ./screenshots -o output.csv
-```
-
-### macOS
-
-```bash
-brew install tesseract
-pip install -r requirements.txt
-python screenshot_to_csv.py ./screenshots -o output.csv
-```
-
-### Windows (Native)
-
-1. Install Python 3.10+ from [python.org](https://www.python.org/downloads/)
-2. Download and install the Tesseract OCR engine from [UB Mannheim's builds](https://github.com/UB-Mannheim/tesseract/wiki). During install, note the install path (default is `C:\Program Files\Tesseract-OCR`).
-3. Add Tesseract to your system PATH, or set it in the environment:
-   ```powershell
-   $env:PATH += ";C:\Program Files\Tesseract-OCR"
-   ```
-4. Install Python dependencies and run:
-   ```powershell
-   pip install -r requirements.txt
-   python screenshot_to_csv.py .\screenshots -o output.csv
-   ```
-
-If `pytesseract` can't find the Tesseract binary, you can point it directly by setting the `TESSDATA_PREFIX` environment variable or by setting the path in Python before running:
 ```powershell
-$env:TESSERACT_CMD = "C:\Program Files\Tesseract-OCR\tesseract.exe"
+docker run --rm -v C:\Users\me\Desktop\screenshots:/data screenshot-to-csv
 ```
-
-## CLI Options
-
-```
-python screenshot_to_csv.py <screenshot_dir> [--output output.csv]
-```
-
-| Argument | Description |
-|---|---|
-| `screenshot_dir` | Path to folder containing screenshot images (required) |
-| `--output`, `-o` | Output CSV file path (default: `output.csv`) |
 
 ## Custom Regex Patterns
 
@@ -110,26 +57,20 @@ The extraction patterns are configurable via environment variables. Each regex m
 
 ### Examples
 
-**Docker:**
-```bash
-docker run --rm \
-  -e DEVICE_ID_REGEX='(?i)ID[\s:=]*([A-Z0-9\-]+)' \
-  -e PHONE_REGEX='(\+?\d[\d\-]{9,})' \
-  -v ./screenshots:/data screenshot-to-csv
-```
-
-**Local (Linux/macOS):**
-```bash
-DEVICE_ID_REGEX='(?i)ID[\s:=]*([A-Z0-9\-]+)' \
-PHONE_REGEX='(\+?\d[\d\-]{9,})' \
-python screenshot_to_csv.py ./screenshots
-```
-
-**Local (Windows PowerShell):**
 ```powershell
-$env:DEVICE_ID_REGEX = '(?i)ID[\s:=]*([A-Z0-9\-]+)'
-$env:PHONE_REGEX = '(\+?\d[\d\-]{9,})'
-python screenshot_to_csv.py .\screenshots
+# PowerShell:
+docker run --rm `
+  -e DEVICE_ID_REGEX='(?i)ID[\s:=]*([A-Z0-9\-]+)' `
+  -e PHONE_REGEX='(\+?\d[\d\-]{9,})' `
+  -v ${PWD}\screenshots:/data screenshot-to-csv
+```
+
+```cmd
+:: Command Prompt:
+docker run --rm ^
+  -e DEVICE_ID_REGEX="(?i)ID[\s:=]*([A-Z0-9\-]+)" ^
+  -e PHONE_REGEX="(\+?\d[\d\-]{9,})" ^
+  -v %cd%\screenshots:/data screenshot-to-csv
 ```
 
 ### Writing Custom Patterns
@@ -137,12 +78,8 @@ python screenshot_to_csv.py .\screenshots
 - Use [regex101.com](https://regex101.com/) (set flavor to Python) to test patterns against sample OCR text
 - The regex must have exactly **one capture group** `()` — that group's match becomes the value in the CSV
 - If the OCR output isn't what you expect, run Tesseract directly on a sample image to see the raw text:
-  ```bash
-  # Docker:
-  docker run --rm -v ./screenshots:/data --entrypoint tesseract screenshot-to-csv /data/sample.png stdout
-
-  # Local:
-  tesseract sample.png stdout
+  ```powershell
+  docker run --rm -v ${PWD}\screenshots:/data --entrypoint tesseract screenshot-to-csv /data/sample.png stdout
   ```
 
 ## Supported Image Formats
@@ -165,6 +102,6 @@ Phone numbers are normalized to digits only (with leading `+` preserved for inte
 |---|---|
 | "No image files found" | Check that the directory path is correct and contains supported image types |
 | "no device_id/phone pair detected" on many files | The default regex may not match your screenshot format — inspect the raw OCR output (see above) and set custom `DEVICE_ID_REGEX`/`PHONE_REGEX` |
-| Tesseract not found | Ensure Tesseract is installed and on your PATH. On Windows, verify the install path matches what `pytesseract` expects |
+| Docker says "path not found" or empty `/data` | Make sure you're using the right path syntax for your shell (`${PWD}` in PowerShell, `%cd%` in cmd). Or use a full absolute path like `C:\Users\me\screenshots` |
 | Poor OCR accuracy | Ensure screenshots are reasonably high resolution. Cropping to just the relevant area can help. Tesseract works best on clean, high-contrast text |
 | Pairs are mismatched | The tool pairs device IDs and phone numbers by position (first ID with first phone, etc.). If your screenshots contain multiple pairs, make sure the OCR reads them in the correct order — top to bottom, left to right |
